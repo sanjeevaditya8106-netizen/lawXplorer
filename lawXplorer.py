@@ -1,6 +1,7 @@
 import os
 import time
 import requests
+import pandas as pd
 import streamlit as st
 import torch
 from transformers import AutoTokenizer, AutoModel
@@ -136,7 +137,6 @@ def get_latest_amendments(api_key_for_cache, language="English"):
         f"For each, provide the amendment number, year, and a concise summary of its impact."
     )
     
-    # Fixed: snake_case 'system_instruction' schema
     payload = {
         "contents": [{"parts": [{"text": amendment_query}]}],
         "tools": [{"google_search": {}}], 
@@ -167,7 +167,6 @@ def get_law_news(api_key_for_cache, language="English"):
 
     news_query = f"Summarize the top 3 most significant legal news headlines in India today in {language}."
     
-    # Fixed: snake_case 'system_instruction' schema
     payload = {
         "contents": [{"parts": [{"text": news_query}]}],
         "tools": [{"google_search": {}}], 
@@ -255,6 +254,80 @@ def main():
             "It is for informational purposes only and is **not a substitute for professional legal counsel**."
         )
 
+    # --- ChromaDB Knowledge Base Manager (View, Add, Delete) ---
+    with st.expander("🗂️ Manage ChromaDB Precedents (Knowledge Base Manager)", expanded=False):
+        tab_view, tab_add, tab_delete = st.tabs(["📋 View All Indexed Precedents", "➕ Add Precedent", "🗑️ Delete Precedent"])
+
+        # Tab 1: Tabular view of all records in ChromaDB
+        with tab_view:
+            all_records = vector_db.collection.get(include=["documents", "metadatas"])
+            if all_records and all_records.get("ids"):
+                records_data = []
+                for cid, doc, meta in zip(all_records["ids"], all_records["documents"], all_records["metadatas"]):
+                    records_data.append({
+                        "ID": cid,
+                        "Case Name": meta.get("case_name", ""),
+                        "Citation": meta.get("citation", ""),
+                        "Topic": meta.get("topic", ""),
+                        "Status": meta.get("citator_status", ""),
+                        "Holding / Summary": doc
+                    })
+                df_cases = pd.DataFrame(records_data)
+                st.dataframe(df_cases, use_container_width=True)
+                st.caption(f"Total Precedents in Vector DB: **{len(records_data)}**")
+            else:
+                st.info("No records currently indexed in ChromaDB.")
+
+        # Tab 2: Form to insert new case into ChromaDB at runtime
+        with tab_add:
+            st.markdown("##### Insert New Landmark Case Precedent")
+            with st.form("form_add_precedent"):
+                new_id = st.text_input("Unique Case ID", placeholder="case_006")
+                new_name = st.text_input("Case Name", placeholder="e.g., Minerva Mills Ltd. v. Union of India")
+                new_citation = st.text_input("Citation", placeholder="e.g., (1980) 3 SCC 625")
+                new_topic = st.selectbox(
+                    "Area of Law / Topic",
+                    ["Fundamental Rights", "Directive Principles", "Union & State Relations", "Constitutional Amendments", "Judiciary & Courts", "Contract & Commercial Law", "Other"]
+                )
+                new_status = st.selectbox("Citator Status", ["ACTIVE PRECEDENT", "OVERRULED", "DISTINGUISHED"])
+                new_text = st.text_area("Holding / Legal Rule", placeholder="Enter operative judgment holding or constitutional principle...")
+                
+                submit_add = st.form_submit_button("Index into ChromaDB")
+                if submit_add:
+                    if new_id and new_name and new_text:
+                        new_entry = [{
+                            "id": new_id.strip(),
+                            "text": new_text.strip(),
+                            "metadata": {
+                                "case_name": new_name.strip(),
+                                "citation": new_citation.strip(),
+                                "topic": new_topic,
+                                "citator_status": new_status
+                            }
+                        }]
+                        vector_db.add_precedents(new_entry)
+                        st.success(f"Indexed precedent '{new_name}' into ChromaDB.")
+                        st.rerun()
+                    else:
+                        st.warning("Please provide ID, Case Name, and Holding text.")
+
+        # Tab 3: Delete records by ID
+        with tab_delete:
+            st.markdown("##### Remove Precedent by ID")
+            current_coll_data = vector_db.collection.get()
+            existing_ids = current_coll_data["ids"] if current_coll_data else []
+
+            if existing_ids:
+                selected_del_id = st.selectbox("Select Case ID to remove", existing_ids)
+                if st.button("Delete Case from ChromaDB", type="secondary"):
+                    vector_db.collection.delete(ids=[selected_del_id])
+                    st.warning(f"Deleted `{selected_del_id}` from ChromaDB.")
+                    st.rerun()
+            else:
+                st.info("No records available to delete.")
+
+    st.markdown("---")
+
     # Main Query Workspace
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -290,13 +363,16 @@ def main():
 
         with col_left:
             st.subheader("📚 ChromaDB Retrieved Precedents")
-            for case in matched_cases:
-                status = case["metadata"]["citator_status"]
-                badge = "red" if "OVERRULED" in status else "green"
-                st.markdown(f"**{case['metadata']['case_name']}** (`{case['metadata']['citation']}`)")
-                st.markdown(f"Similarity Score: `{case['similarity_score']}` | Citator Status: :{badge}[{status}]")
-                st.markdown(f"> {case['text']}")
-                st.markdown("---")
+            if matched_cases:
+                for case in matched_cases:
+                    status = case["metadata"]["citator_status"]
+                    badge = "red" if "OVERRULED" in status else "green"
+                    st.markdown(f"**{case['metadata']['case_name']}** (`{case['metadata']['citation']}`)")
+                    st.markdown(f"Similarity Score: `{case['similarity_score']}` | Citator Status: :{badge}[{status}]")
+                    st.markdown(f"> {case['text']}")
+                    st.markdown("---")
+            else:
+                st.info("No direct precedents found for this topic/query filter in ChromaDB.")
 
             if bert_features:
                 with st.expander("🔬 InLegalBERT Tensor Representation"):
